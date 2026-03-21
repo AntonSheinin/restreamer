@@ -1,0 +1,12 @@
+services:
+  livex2hls:
+    build:
+      context: .
+    container_name: livex2hls-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8092:8092"
+    volumes:
+      - ./runtime:/app/runtime
