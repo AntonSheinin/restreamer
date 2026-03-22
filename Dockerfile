@@ -33,6 +33,7 @@ WORKDIR /app
 
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --chown=app:app app ./app
+COPY --chown=app:app streams.toml ./streams.toml
 
 RUN mkdir -p /app/runtime \
     && chown -R app:app /app

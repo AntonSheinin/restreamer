@@ -7,10 +7,10 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
-class WorkerStatus(BaseModel):
+class ChannelStatus(BaseModel):
+    channel: str
+    output_format: Literal["hls", "tshttp"]
     state: Literal["starting", "running", "restarting", "error"] = "starting"
     restart_count: int = 0
-    consecutive_failures: int = 0
-    playlist_ready: bool = False
     last_error: str | None = None
     pid: int | None = None

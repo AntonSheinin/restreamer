@@ -1,7 +1,7 @@
 [project]
-name = "livex2hls-service"
+name = "restreamer"
 version = "0.1.0"
-description = "FastAPI DASH-to-HLS proxy for Flussonic ingest."
+description = "Multi-channel restreamer for HLS and TSHTTP outputs."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

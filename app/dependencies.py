@@ -4,7 +4,7 @@ from fastapi import Depends, Request
 
 from app.config import Settings
 from app.services.files import FileService
-from app.services.worker import WorkerService
+from app.services.worker import ChannelManager
 
 
 def get_settings(request: Request) -> Settings:
@@ -15,10 +15,10 @@ def get_file_service(request: Request) -> FileService:
     return cast(FileService, request.app.state.file_service)
 
 
-def get_worker_service(request: Request) -> WorkerService:
-    return cast(WorkerService, request.app.state.worker_service)
+def get_channel_manager(request: Request) -> ChannelManager:
+    return cast(ChannelManager, request.app.state.channel_manager)
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 FileServiceDep = Annotated[FileService, Depends(get_file_service)]
-WorkerServiceDep = Annotated[WorkerService, Depends(get_worker_service)]
+ChannelManagerDep = Annotated[ChannelManager, Depends(get_channel_manager)]

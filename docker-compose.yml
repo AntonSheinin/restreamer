@@ -1,8 +1,10 @@
+name: restreamer
+
 services:
-  livex2hls:
+  restreamer:
     build:
       context: .
-    container_name: livex2hls-service
+    container_name: restreamer
     restart: unless-stopped
     env_file:
       - .env
@@ -10,3 +12,4 @@ services:
       - "8092:8092"
     volumes:
       - ./runtime:/app/runtime
+      - ./streams.toml:/app/streams.toml:ro

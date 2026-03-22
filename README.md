@@ -1,6 +1,6 @@
-# livex2hls-service
+# restreamer
 
-Minimal FastAPI service that pulls a DASH `.livx` stream with `ffmpeg` and exposes it as HLS for Flussonic ingest.
+Minimal FastAPI service that pulls one or more DASH `.livx` streams with `ffmpeg` and exposes each channel as either HLS or MPEG-TS over HTTP.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ Minimal FastAPI service that pulls a DASH `.livx` stream with `ffmpeg` and expos
 ## Docker
 
 1. Copy `.env.example` to `.env`.
-2. Set `SOURCE_URL` to your KAN `.livx` URL.
+2. Edit `streams.toml` and define your channels.
 3. Build and run with Docker Compose:
 
 ```bash
@@ -21,35 +21,80 @@ The container:
 - installs `ffmpeg`
 - installs Python dependencies with `uv`
 - exposes the service on port `8092`
-- writes HLS output to `./runtime` on the host
+- starts one ffmpeg worker per configured channel
 
-The service starts `ffmpeg` automatically and exposes HLS at:
+## Configuration
 
-```text
-http://<host>:8092/hls/index.m3u8
+`.env` contains only global process settings:
+
+- `FFMPEG_LOGLEVEL`: ffmpeg stderr verbosity, default `info`
+- `STREAMS_CONFIG`: startup path to `streams.toml`, default `streams.toml`
+
+`streams.toml` contains the channel definitions. Example:
+
+```toml
+[channels.kan11]
+source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/kan11/live.livx"
+output_format = "tshttp"
+
+[channels.kan11.transcoding]
+video = "copy"
+audio = "transcode"
+
+[channels.kan11.tshttp]
+stale_output_seconds = 15
+
+[channels.kan23]
+source_url = "https://example.invalid/live/kan23/live.livx"
+output_format = "hls"
+
+[channels.kan23.transcoding]
+video = "copy"
+audio = "copy"
+
+[channels.kan23.hls]
+segment_time = 4
+list_size = 6
 ```
 
-## Environment Variables
+`transcoding.video` and `transcoding.audio` accept:
 
-- `SOURCE_URL`: required DASH `.livx` URL
-- `HLS_SEGMENT_TIME`: HLS segment target duration, default `2`
-- `HLS_LIST_SIZE`: number of segments kept in the playlist, default `12`
+- `copy`
+- `transcode`
 
-The container runtime is fixed:
+Current ffmpeg behavior:
 
-- `ffmpeg` path is `/usr/bin/ffmpeg`
-- HLS output directory is `/app/runtime` inside the container and `./runtime` on the host via Docker Compose
-- host and port are controlled by the container command and compose port mapping
+- `video = "copy"` uses `-c:v copy`
+- `video = "transcode"` uses `libx264`
+- `audio = "copy"` uses `-c:a copy`
+- `audio = "transcode"` uses AAC with the existing resample settings
+
+## Output URLs
+
+TSHTTP channel:
+
+```text
+tshttp://<host>:8092/channels/kan11/stream.ts
+```
+
+HLS channel:
+
+```text
+http://<host>:8092/channels/kan23/hls/index.m3u8
+```
 
 ## Endpoints
 
 - `GET /health`
-- `GET /status`
-- `GET /hls/index.m3u8`
-- `GET /hls/{segment_name}`
+- `GET /channels`
+- `GET /channels/{channel}`
+- `GET /channels/{channel}/hls/index.m3u8`
+- `GET /channels/{channel}/hls/{asset_name}`
+- `GET /channels/{channel}/stream.ts`
 
 ## Troubleshooting
 
-- `503` from `/hls/index.m3u8` means the worker has not produced the first playlist yet.
 - If startup fails immediately, verify that the container image built successfully and includes `ffmpeg`.
-- If the worker keeps restarting, verify that `SOURCE_URL` points to a reachable DASH MPD that `ffmpeg` can read.
+- If the app fails on startup, verify that `/app/streams.toml` exists and defines at least one channel.
+- If a worker keeps restarting, verify that the channel `source_url` points to a reachable DASH MPD that `ffmpeg` can read.
+- TSHTTP channels allow only one active client per channel at a time. A second client receives `409 Conflict`.
