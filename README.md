@@ -27,7 +27,7 @@ The container:
 
 `.env` contains only global process settings:
 
-- `FFMPEG_LOGLEVEL`: ffmpeg stderr verbosity, default `info`
+- `DEBUG`: when `false`, app logs stay at `info` and ffmpeg runs with `-loglevel quiet`; when `true`, app logs include `debug` and ffmpeg runs with minimal ffmpeg warnings via `-loglevel warning`
 - `STREAMS_CONFIG`: startup path to `streams.toml`, default `streams.toml`
 
 `streams.toml` contains the channel definitions. Example:
@@ -88,9 +88,12 @@ http://<host>:8092/channels/kan23/hls/index.m3u8
 - `GET /health`
 - `GET /channels`
 - `GET /channels/{channel}`
+- `POST /channels/{channel}/reload`
 - `GET /channels/{channel}/hls/index.m3u8`
 - `GET /channels/{channel}/hls/{asset_name}`
 - `GET /channels/{channel}/stream.ts`
+
+`POST /channels/{channel}/reload` reloads a single channel from `streams.toml` without restarting the app. This lets you edit one channel definition and apply it from Swagger UI immediately.
 
 ## Troubleshooting
 

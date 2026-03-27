@@ -45,4 +45,4 @@ EXPOSE 8092
 
 USER app
 
-CMD ["fastapi", "run", "app/app.py", "--host", "0.0.0.0", "--port", "8092"]
+CMD ["uvicorn", "app.app:app", "--host", "0.0.0.0", "--port", "8092", "--no-access-log"]

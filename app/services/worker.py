@@ -4,8 +4,15 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from asyncio.subprocess import Process
+from pathlib import Path
 
-from app.config import ChannelConfig, FFMPEG_PATH, Settings
+from app.config import (
+    ChannelConfig,
+    FFMPEG_PATH,
+    Settings,
+    TshttpChannelConfig,
+    load_channel_config,
+)
 from app.models import ChannelStatus
 from app.services.files import FileService
 
@@ -73,8 +80,9 @@ class BaseChannelWorker(ABC):
             try:
                 await self._before_start()
                 command = self._build_ffmpeg_command()
-                logger.info(
-                    "starting ffmpeg worker for %s: %s",
+                logger.info("starting ffmpeg worker for %s", self.channel.name)
+                logger.debug(
+                    "ffmpeg command for %s: %s",
                     self.channel.name,
                     " ".join(command),
                 )
@@ -160,7 +168,7 @@ class BaseChannelWorker(ABC):
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue
-            logger.info("ffmpeg-%s: %s", self.channel.name, text)
+            logger.debug("ffmpeg-%s: %s", self.channel.name, text)
             last_lines.append(text)
             if len(last_lines) > 5:
                 last_lines.pop(0)
@@ -203,9 +211,14 @@ class BaseChannelWorker(ABC):
         await self._after_process_stop()
         self._status = self._status.model_copy(update={"pid": None})
 
+    def _active_tshttp_settings(self) -> TshttpChannelConfig | None:
+        if self.channel.output_format != "tshttp":
+            return None
+        return self.channel.tshttp
+
     def _common_ffmpeg_args(self) -> list[str]:
         input_args: list[str] = []
-        tshttp = self.channel.tshttp
+        tshttp = self._active_tshttp_settings()
         if tshttp is not None and tshttp.input_fflags:
             input_args.extend(["-fflags", tshttp.input_fflags])
 
@@ -218,7 +231,7 @@ class BaseChannelWorker(ABC):
             "-nostdin",
             "-hide_banner",
             "-loglevel",
-            self._settings.ffmpeg_loglevel,
+            self._ffmpeg_loglevel(),
             "-stats_period",
             "5",
             "-reconnect",
@@ -241,6 +254,9 @@ class BaseChannelWorker(ABC):
             *video_args,
             *audio_args,
         ]
+
+    def _ffmpeg_loglevel(self) -> str:
+        return "warning" if self._settings.debug else "quiet"
 
     def _video_ffmpeg_args(self) -> list[str]:
         if self.channel.transcoding.video == "transcode":
@@ -459,6 +475,7 @@ class ChannelManager:
         self._workers: dict[str, BaseChannelWorker] = {
             channel.name: self._build_worker(channel) for channel in channels
         }
+        self._reload_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self._file_service.prepare_runtime_root()
@@ -468,6 +485,26 @@ class ChannelManager:
     async def stop(self) -> None:
         for worker in self._workers.values():
             await worker.stop()
+
+    async def reload_channel(self, channel_name: str, config_path: Path) -> ChannelStatus | None:
+        channel = load_channel_config(config_path, channel_name)
+        if channel is None:
+            return None
+
+        async with self._reload_lock:
+            existing_worker = self._workers.get(channel_name)
+            if existing_worker is not None:
+                await existing_worker.stop()
+
+            worker = self._build_worker(channel)
+            self._channels[channel_name] = channel
+            self._workers[channel_name] = worker
+            try:
+                await worker.start()
+            except Exception:
+                logger.exception("failed to start reloaded worker for %s", channel_name)
+                raise
+            return worker.get_status()
 
     def list_statuses(self) -> list[ChannelStatus]:
         return [self._workers[name].get_status() for name in sorted(self._workers)]

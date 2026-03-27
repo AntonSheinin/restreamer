@@ -1,23 +1,32 @@
 [channels.kan11]
 source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/kan11/live.livx"
-output_format = "tshttp"
+output_format = "hls"
 
 [channels.kan11.transcoding]
-video = "transcode"
+video = "copy"
 audio = "transcode"
+
+[channels.kan11.hls]
+segment_time = 4
+list_size = 6
 
 [channels.kan11.tshttp]
 stale_output_seconds = 15
+input_fflags = "+genpts"
 copytb = 1
-mpegts_copyts = true
+mpegts_copyts = false
 
 [channels.kan_edu]
 source_url = "https://n-121-7.il.cdn-redge.media/livedash/oil/kancdn-live/live/kan_edu/live.livx"
-output_format = "tshttp"
+output_format = "hls"
 
 [channels.kan_edu.transcoding]
 video = "copy"
 audio = "transcode"
+
+[channels.kan_edu.hls]
+segment_time = 4
+list_size = 6
 
 [channels.kan_edu.tshttp]
 stale_output_seconds = 15

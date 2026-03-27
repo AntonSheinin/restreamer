@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import ValidationError
 
-from app.dependencies import ChannelManagerDep, FileServiceDep
+from app.dependencies import ChannelManagerDep, FileServiceDep, SettingsDep
 from app.models import ChannelStatus, HealthResponse
 from app.services.worker import ActiveStreamConflict
 
@@ -21,6 +22,27 @@ async def list_channels(channel_manager: ChannelManagerDep) -> list[ChannelStatu
 @router.get("/channels/{channel}", response_model=ChannelStatus, tags=["channels"])
 async def channel_status(channel: str, channel_manager: ChannelManagerDep) -> ChannelStatus:
     status_model = channel_manager.get_status(channel)
+    if status_model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
+    return status_model
+
+
+@router.post("/channels/{channel}/reload", response_model=ChannelStatus, tags=["channels"])
+async def reload_channel(
+    channel: str,
+    settings: SettingsDep,
+    channel_manager: ChannelManagerDep,
+) -> ChannelStatus:
+    try:
+        status_model = await channel_manager.reload_channel(channel, settings.streams_config)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"streams config not found: {settings.streams_config}",
+        ) from exc
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     if status_model is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
     return status_model

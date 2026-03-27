@@ -46,12 +46,8 @@ class ChannelConfig(BaseModel):
     @model_validator(mode="after")
     def validate_output_settings(self) -> "ChannelConfig":
         if self.output_format == "hls":
-            if self.tshttp is not None:
-                raise ValueError("hls channels cannot define tshttp settings")
             self.hls = self.hls or HlsChannelConfig()
         else:
-            if self.hls is not None:
-                raise ValueError("tshttp channels cannot define hls settings")
             self.tshttp = self.tshttp or TshttpChannelConfig()
         return self
 
@@ -61,7 +57,7 @@ class StreamsConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    ffmpeg_loglevel: str = Field("info", alias="FFMPEG_LOGLEVEL")
+    debug: bool = Field(False, alias="DEBUG")
     streams_config: Path = Field(Path("streams.toml"), alias="STREAMS_CONFIG")
 
     model_config = SettingsConfigDict(
@@ -73,12 +69,26 @@ class Settings(BaseSettings):
     )
 
 
-def load_streams_config(path: Path) -> StreamsConfig:
+def _load_raw_channels(path: Path) -> dict[str, object]:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     raw_channels = raw.get("channels")
     if not isinstance(raw_channels, dict) or not raw_channels:
         raise ValueError("streams.toml must define at least one channel under [channels.<name>]")
+    return raw_channels
 
+
+def load_channel_config(path: Path, channel_name: str) -> ChannelConfig | None:
+    raw_channels = _load_raw_channels(path)
+    payload = raw_channels.get(channel_name)
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError(f"channel '{channel_name}' must be a table")
+    return ChannelConfig(name=channel_name, **payload)
+
+
+def load_streams_config(path: Path) -> StreamsConfig:
+    raw_channels = _load_raw_channels(path)
     channels: list[ChannelConfig] = []
     for name, payload in raw_channels.items():
         if not isinstance(payload, dict):
