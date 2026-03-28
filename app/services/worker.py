@@ -1,9 +1,12 @@
 import asyncio
 import contextlib
+import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from asyncio.subprocess import Process
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import (
@@ -17,10 +20,18 @@ from app.models import ChannelStatus
 from app.services.files import FileService
 
 logger = logging.getLogger("uvicorn.error")
+SEGMENT_NUMBER_PATTERN = re.compile(r"segment_(\d+)\.ts$")
 
 
 class ActiveStreamConflict(Exception):
     pass
+
+
+@dataclass
+class HlsSegmentProbe:
+    first_video_pts: float | None
+    audio_stream_present: bool
+    audio_packet_count: int | None
 
 
 class BaseChannelWorker(ABC):
@@ -260,14 +271,34 @@ class BaseChannelWorker(ABC):
 
     def _video_ffmpeg_args(self) -> list[str]:
         if self.channel.transcoding.video == "transcode":
-            return [
+            args = [
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-tune",
                 "zerolatency",
+                "-pix_fmt",
+                "yuv420p",
             ]
+            if (
+                self.channel.transcoding.video_width is not None
+                and self.channel.transcoding.video_height is not None
+            ):
+                args.extend(
+                    [
+                        "-vf",
+                        f"scale={self.channel.transcoding.video_width}:{self.channel.transcoding.video_height}",
+                    ]
+                )
+            if self.channel.transcoding.video_bitrate is not None:
+                args.extend(
+                    [
+                        "-b:v",
+                        self.channel.transcoding.video_bitrate,
+                    ]
+                )
+            return args
 
         return [
             "-c:v",
@@ -306,8 +337,40 @@ class BaseChannelWorker(ABC):
 
 
 class HlsChannelWorker(BaseChannelWorker):
+    _playlist_poll_seconds = 1
+    _playlist_stale_floor_seconds = 30
+    _segment_pts_jump_floor_seconds = 30
+
+    def __init__(
+        self,
+        channel: ChannelConfig,
+        settings: Settings,
+        file_service: FileService,
+    ) -> None:
+        super().__init__(channel=channel, settings=settings, file_service=file_service)
+        self._last_playlist_segment_number: int | None = None
+        self._last_playlist_advanced_at: float | None = None
+        self._last_checked_segment_number: int | None = None
+        self._last_checked_segment_pts: float | None = None
+        self._last_checked_segment_duration: float | None = None
+
     async def _before_start(self) -> None:
         await self._file_service.cleanup_hls_outputs(self.channel.name)
+        self._last_playlist_segment_number = None
+        self._last_playlist_advanced_at = None
+        self._last_checked_segment_number = None
+        self._last_checked_segment_pts = None
+        self._last_checked_segment_duration = None
+
+    async def _create_process_tasks(
+        self,
+        process: Process,
+        loop: asyncio.AbstractEventLoop,
+    ) -> list[asyncio.Task[None]]:
+        self._last_playlist_advanced_at = loop.time()
+        return [
+            asyncio.create_task(self._watch_hls_health(process, loop)),
+        ]
 
     def _stdout_target(self) -> int:
         return asyncio.subprocess.DEVNULL
@@ -331,6 +394,205 @@ class HlsChannelWorker(BaseChannelWorker):
             self._file_service.segment_path_pattern(self.channel.name),
             str(self._file_service.playlist_path(self.channel.name)),
         ]
+
+    async def _watch_hls_health(
+        self,
+        process: Process,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        hls = self.channel.hls
+        if hls is None:
+            return
+
+        stale_seconds = max(self._playlist_stale_floor_seconds, hls.segment_time * 3)
+        max_pts_jump_seconds = max(self._segment_pts_jump_floor_seconds, hls.segment_time * 3)
+        playlist_path = self._file_service.playlist_path(self.channel.name)
+
+        while process.returncode is None and not self._stop_event.is_set():
+            await asyncio.sleep(self._playlist_poll_seconds)
+            try:
+                playlist = await asyncio.to_thread(playlist_path.read_text, encoding="utf-8")
+            except FileNotFoundError:
+                if self._last_playlist_advanced_at is None:
+                    self._last_playlist_advanced_at = loop.time()
+                if loop.time() - self._last_playlist_advanced_at > stale_seconds:
+                    await self._terminate_for_health_failure(
+                        process,
+                        f"HLS playlist not created for {stale_seconds}s; restarting",
+                    )
+                    return
+                continue
+
+            playlist_state = self._parse_playlist(playlist)
+            if playlist_state is None:
+                continue
+
+            _, segments = playlist_state
+            latest_segment_name, latest_segment_duration = segments[-1]
+            latest_segment_number = self._segment_number(latest_segment_name)
+            if latest_segment_number is None:
+                continue
+
+            if self._last_playlist_segment_number != latest_segment_number:
+                self._last_playlist_segment_number = latest_segment_number
+                self._last_playlist_advanced_at = loop.time()
+            elif self._last_playlist_advanced_at is not None and (
+                loop.time() - self._last_playlist_advanced_at > stale_seconds
+            ):
+                await self._terminate_for_health_failure(
+                    process,
+                    f"HLS playlist did not advance for {stale_seconds}s; restarting",
+                )
+                return
+
+            if latest_segment_number == self._last_checked_segment_number:
+                continue
+
+            segment_path = self._file_service.resolve_hls_asset_path(
+                self.channel.name,
+                latest_segment_name,
+            )
+            if segment_path is None:
+                continue
+
+            try:
+                probe = await self._probe_hls_segment(segment_path)
+            except Exception as exc:
+                logger.debug(
+                    "ffmpeg-%s: failed to probe segment %s: %s",
+                    self.channel.name,
+                    latest_segment_name,
+                    exc,
+                )
+                continue
+            if probe.audio_stream_present and probe.audio_packet_count == 0:
+                await self._terminate_for_health_failure(
+                    process,
+                    f"HLS segment {latest_segment_name} has an audio stream but no audio packets; restarting",
+                )
+                return
+
+            if (
+                probe.first_video_pts is not None
+                and self._last_checked_segment_number is not None
+                and self._last_checked_segment_pts is not None
+                and latest_segment_number == self._last_checked_segment_number + 1
+            ):
+                pts_delta = probe.first_video_pts - self._last_checked_segment_pts
+                expected_delta = self._last_checked_segment_duration or hls.segment_time
+                if pts_delta < 0 or pts_delta > max(max_pts_jump_seconds, expected_delta * 3):
+                    await self._terminate_for_health_failure(
+                        process,
+                        (
+                            f"HLS segment {latest_segment_name} PTS jumped by {pts_delta:.3f}s "
+                            f"(expected about {expected_delta:.3f}s); restarting"
+                        ),
+                    )
+                    return
+
+            self._last_checked_segment_number = latest_segment_number
+            self._last_checked_segment_pts = probe.first_video_pts
+            self._last_checked_segment_duration = latest_segment_duration
+
+    def _parse_playlist(self, playlist: str) -> tuple[int, list[tuple[str, float]]] | None:
+        media_sequence: int | None = None
+        segments: list[tuple[str, float]] = []
+        current_duration: float | None = None
+
+        for raw_line in playlist.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                media_sequence = int(line.split(":", 1)[1])
+                continue
+            if line.startswith("#EXTINF:"):
+                current_duration = float(line.split(":", 1)[1].split(",", 1)[0])
+                continue
+            if line.startswith("#"):
+                continue
+            if current_duration is None:
+                continue
+            segments.append((line, current_duration))
+            current_duration = None
+
+        if media_sequence is None or not segments:
+            return None
+        return media_sequence, segments
+
+    async def _probe_hls_segment(self, path: Path) -> HlsSegmentProbe:
+        audio_probe = await self._run_ffprobe_json(
+            [
+                "-count_packets",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=nb_read_packets",
+                str(path),
+            ]
+        )
+        video_probe = await self._run_ffprobe_json(
+            [
+                "-select_streams",
+                "v:0",
+                "-show_packets",
+                "-show_entries",
+                "packet=pts_time",
+                "-read_intervals",
+                "%+0.05",
+                str(path),
+            ]
+        )
+
+        audio_streams = audio_probe.get("streams", [])
+        audio_stream_present = bool(audio_streams)
+        audio_packet_count: int | None = None
+        if audio_stream_present:
+            packet_value = audio_streams[0].get("nb_read_packets")
+            if packet_value is not None:
+                audio_packet_count = int(packet_value)
+
+        packets = video_probe.get("packets", [])
+        first_video_pts: float | None = None
+        if packets:
+            first_packet_pts = packets[0].get("pts_time")
+            if first_packet_pts is not None:
+                first_video_pts = float(first_packet_pts)
+
+        return HlsSegmentProbe(
+            first_video_pts=first_video_pts,
+            audio_stream_present=audio_stream_present,
+            audio_packet_count=audio_packet_count,
+        )
+
+    async def _run_ffprobe_json(self, args: list[str]) -> dict[str, object]:
+        process = await asyncio.create_subprocess_exec(
+            str(FFMPEG_PATH.with_name("ffprobe")),
+            "-hide_banner",
+            "-v",
+            "error",
+            "-of",
+            "json",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            error_text = stderr.decode("utf-8", errors="replace").strip() or "unknown ffprobe error"
+            raise RuntimeError(f"ffprobe failed for {self.channel.name}: {error_text}")
+        return json.loads(stdout.decode("utf-8"))
+
+    async def _terminate_for_health_failure(self, process: Process, reason: str) -> None:
+        self._last_stderr_lines = [reason]
+        logger.warning("ffmpeg-%s: %s", self.channel.name, reason)
+        process.terminate()
+
+    def _segment_number(self, segment_name: str) -> int | None:
+        match = SEGMENT_NUMBER_PATTERN.fullmatch(segment_name)
+        if match is None:
+            return None
+        return int(match.group(1))
 
 
 class TshttpChannelWorker(BaseChannelWorker):

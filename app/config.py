@@ -19,6 +19,18 @@ class HlsChannelConfig(BaseModel):
 class TranscodingConfig(BaseModel):
     video: Literal["copy", "transcode"] = "copy"
     audio: Literal["copy", "transcode"] = "transcode"
+    video_width: int | None = Field(None, ge=1)
+    video_height: int | None = Field(None, ge=1)
+    video_bitrate: str | None = None
+
+    @model_validator(mode="after")
+    def validate_video_transcode_settings(self) -> "TranscodingConfig":
+        has_dimensions = self.video_width is not None or self.video_height is not None
+        if has_dimensions and (self.video_width is None or self.video_height is None):
+            raise ValueError("transcoding.video_width and transcoding.video_height must be set together")
+        if self.video == "copy" and (has_dimensions or self.video_bitrate is not None):
+            raise ValueError("video_width, video_height, and video_bitrate require transcoding.video = 'transcode'")
+        return self
 
 
 class TshttpChannelConfig(BaseModel):

@@ -38,8 +38,11 @@ source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/k
 output_format = "tshttp"
 
 [channels.kan11.transcoding]
-video = "copy"
+video = "transcode"
 audio = "transcode"
+video_width = 1280
+video_height = 720
+video_bitrate = "2800k"
 
 [channels.kan11.tshttp]
 stale_output_seconds = 15
@@ -66,6 +69,8 @@ Current ffmpeg behavior:
 
 - `video = "copy"` uses `-c:v copy`
 - `video = "transcode"` uses `libx264`
+- `transcoding.video_width` and `transcoding.video_height` add a fixed `scale=W:H`
+- `transcoding.video_bitrate` adds `-b:v`
 - `audio = "copy"` uses `-c:a copy`
 - `audio = "transcode"` uses AAC with the existing resample settings
 
