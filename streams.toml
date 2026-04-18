@@ -37,6 +37,54 @@ input_fflags = "+genpts"
 copytb = 1
 mpegts_copyts = false
 
+[channels.keshet12]
+source_type = "mako_keshet12"
+output_format = "hls"
+
+[channels.keshet12.input]
+stream = "clean"
+variant = "highest"
+
+[channels.keshet12.transcoding]
+video = "copy"
+audio = "transcode"
+
+[channels.keshet12.hls]
+segment_time = 4
+list_size = 30
+delete_threshold = 30
+
+[channels.aruz14]
+source_url = "https://n-121-3.il.cdn-redge.media/livedash/oil/ch14/live/ch14/live.livx"
+output_format = "hls"
+
+[channels.aruz14.transcoding]
+video = "transcode"
+audio = "transcode"
+video_width = 960
+video_height = 540
+video_bitrate = "2200k"
+video_fps = 25
+
+[channels.aruz14.hls]
+segment_time = 4
+list_size = 30
+delete_threshold = 30
+
+[channels.reshet13]
+source_url = "https://dsk76kvc9kie6.cloudfront.net/media/87f59c77-03f6-4bad-a648-897e095e7360/profile/3/profileManifest.m3u8?_uid=273f8b60-7abd-40a3-898d-75a565a83449&rK=a8&_did=b097ec6f-8a0e-41f1-9a8d-96560dbec644"
+input_live_start_index = -3
+output_format = "hls"
+
+[channels.reshet13.transcoding]
+video = "copy"
+audio = "transcode"
+
+[channels.reshet13.hls]
+segment_time = 4
+list_size = 30
+delete_threshold = 30
+
 # Example HLS channel:
 # [channels.kan23]
 # source_url = "https://example.invalid/live/kan23/live.livx"

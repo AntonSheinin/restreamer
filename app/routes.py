@@ -1,17 +1,93 @@
-from fastapi import APIRouter, HTTPException, status
+import re
+
+from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
-from app.dependencies import ChannelManagerDep, FileServiceDep, SettingsDep
-from app.models import ChannelStatus, HealthResponse
+from app.dependencies import AccessTokenDep, ChannelManagerDep, FileServiceDep, SettingsDep
+from app.models import ChannelStatus, HealthResponse, StatsResponse
 from app.services.worker import ActiveStreamConflict
 
 router = APIRouter()
+BYTE_RANGE_PATTERN = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _cache_headers(cache_control: str, content_length: int) -> dict[str, str]:
+    return {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": cache_control,
+        "Content-Length": str(content_length),
+    }
+
+
+def _parse_byte_range(range_header: str | None, file_size: int) -> tuple[int, int] | None:
+    if range_header is None:
+        return None
+
+    match = BYTE_RANGE_PATTERN.fullmatch(range_header.strip())
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            headers={"Content-Range": f"bytes */{file_size}"},
+            detail="unsupported byte range",
+        )
+
+    start_text, end_text = match.groups()
+    if not start_text and not end_text:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            headers={"Content-Range": f"bytes */{file_size}"},
+            detail="invalid byte range",
+        )
+
+    if not start_text:
+        suffix_length = int(end_text)
+        if suffix_length == 0:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                headers={"Content-Range": f"bytes */{file_size}"},
+                detail="invalid byte range",
+            )
+        start = max(file_size - suffix_length, 0)
+        end = file_size - 1
+    else:
+        start = int(start_text)
+        end = int(end_text) if end_text else file_size - 1
+
+    if file_size == 0 or start >= file_size or end < start:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            headers={"Content-Range": f"bytes */{file_size}"},
+            detail="byte range not satisfiable",
+        )
+
+    return start, min(end, file_size - 1)
+
+
+def _range_headers(cache_control: str, file_size: int, start: int, end: int) -> dict[str, str]:
+    content_length = end - start + 1
+    return {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": cache_control,
+        "Content-Length": str(content_length),
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+    }
 
 
 @router.get("/health", response_model=HealthResponse, tags=["health"])
-async def health() -> HealthResponse:
+async def health(_access_token: AccessTokenDep) -> HealthResponse:
     return HealthResponse()
+
+
+@router.get("/stats", response_model=StatsResponse, tags=["stats"])
+async def stats(
+    _access_token: AccessTokenDep,
+    channel_manager: ChannelManagerDep,
+) -> StatsResponse:
+    return StatsResponse(
+        active_channels=channel_manager.count_active_channels(),
+        consumed_channels=channel_manager.count_consumed_channels(),
+    )
 
 
 @router.get("/channels", response_model=list[ChannelStatus], tags=["channels"])
@@ -48,6 +124,8 @@ async def reload_channel(
     return status_model
 
 
+@router.get("/channels/{channel}/hls", tags=["hls"])
+@router.get("/channels/{channel}/hls/", tags=["hls"])
 @router.get("/channels/{channel}/hls/index.m3u8", tags=["hls"])
 async def hls_playlist(
     channel: str,
@@ -76,7 +154,41 @@ async def hls_playlist(
     return Response(
         content=content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-store"},
+        headers=_cache_headers("no-store", len(content)),
+    )
+
+
+@router.head("/channels/{channel}/hls", tags=["hls"])
+@router.head("/channels/{channel}/hls/", tags=["hls"])
+@router.head("/channels/{channel}/hls/index.m3u8", tags=["hls"])
+async def hls_playlist_head(
+    channel: str,
+    channel_manager: ChannelManagerDep,
+    file_service: FileServiceDep,
+) -> Response:
+    channel_config = channel_manager.get_channel(channel)
+    if channel_config is None or channel_config.output_format != "hls":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
+
+    playlist_path = file_service.playlist_path(channel)
+    if not await file_service.playlist_exists(channel):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="playlist is not ready",
+        )
+
+    try:
+        size = await file_service.file_size(playlist_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="playlist is not ready",
+        ) from exc
+
+    return Response(
+        content=b"",
+        media_type="application/vnd.apple.mpegurl",
+        headers=_cache_headers("no-store", size),
     )
 
 
@@ -86,6 +198,7 @@ async def hls_asset(
     asset_name: str,
     channel_manager: ChannelManagerDep,
     file_service: FileServiceDep,
+    range_header: str | None = Header(default=None, alias="Range"),
 ) -> Response:
     channel_config = channel_manager.get_channel(channel)
     if channel_config is None or channel_config.output_format != "hls":
@@ -96,6 +209,26 @@ async def hls_asset(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
 
     try:
+        size = await file_service.file_size(asset_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
+
+    byte_range = _parse_byte_range(range_header, size)
+    if byte_range is not None:
+        start, end = byte_range
+        try:
+            content = await file_service.read_byte_range(asset_path, start, end)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
+
+        return Response(
+            content=content,
+            media_type="video/mp2t",
+            headers=_range_headers("no-cache", size, start, end),
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+        )
+
+    try:
         content = await file_service.read_bytes(asset_path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
@@ -103,7 +236,45 @@ async def hls_asset(
     return Response(
         content=content,
         media_type="video/mp2t",
-        headers={"Cache-Control": "no-cache"},
+        headers=_cache_headers("no-cache", size),
+    )
+
+
+@router.head("/channels/{channel}/hls/{asset_name}", tags=["hls"])
+async def hls_asset_head(
+    channel: str,
+    asset_name: str,
+    channel_manager: ChannelManagerDep,
+    file_service: FileServiceDep,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    channel_config = channel_manager.get_channel(channel)
+    if channel_config is None or channel_config.output_format != "hls":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="channel not found")
+
+    asset_path = file_service.resolve_hls_asset_path(channel, asset_name)
+    if asset_path is None or not await file_service.file_exists(asset_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
+
+    try:
+        size = await file_service.file_size(asset_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
+
+    byte_range = _parse_byte_range(range_header, size)
+    if byte_range is not None:
+        start, end = byte_range
+        return Response(
+            content=b"",
+            media_type="video/mp2t",
+            headers=_range_headers("no-cache", size, start, end),
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+        )
+
+    return Response(
+        content=b"",
+        media_type="video/mp2t",
+        headers=_cache_headers("no-cache", size),
     )
 
 

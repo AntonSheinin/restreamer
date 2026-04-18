@@ -18,6 +18,11 @@ from app.config import (
 )
 from app.models import ChannelStatus
 from app.services.files import FileService
+from app.services.source_resolver import (
+    ResolvedSource,
+    SourceResolutionError,
+    build_source_resolver,
+)
 
 logger = logging.getLogger("uvicorn.error")
 SEGMENT_NUMBER_PATTERN = re.compile(r"segment_(\d+)\.ts$")
@@ -32,6 +37,8 @@ class HlsSegmentProbe:
     first_video_pts: float | None
     audio_stream_present: bool
     audio_packet_count: int | None
+    audio_sample_rate: int | None
+    audio_channels: int | None
 
 
 class BaseChannelWorker(ABC):
@@ -52,6 +59,8 @@ class BaseChannelWorker(ABC):
         self._stop_event = asyncio.Event()
         self._status = ChannelStatus(channel=channel.name, output_format=channel.output_format)
         self._last_stderr_lines: list[str] = []
+        self._source_resolver = build_source_resolver(channel)
+        self._resolved_source: ResolvedSource | None = None
 
     async def start(self) -> None:
         if self._supervisor_task is not None:
@@ -74,6 +83,9 @@ class BaseChannelWorker(ABC):
     def get_status(self) -> ChannelStatus:
         return self._status
 
+    def is_consumed(self) -> bool:
+        return False
+
     async def _supervise(self) -> None:
         loop = asyncio.get_running_loop()
         attempt = 0
@@ -90,6 +102,7 @@ class BaseChannelWorker(ABC):
 
             try:
                 await self._before_start()
+                self._resolved_source = await self._source_resolver.resolve()
                 command = self._build_ffmpeg_command()
                 logger.info("starting ffmpeg worker for %s", self.channel.name)
                 logger.debug(
@@ -111,6 +124,24 @@ class BaseChannelWorker(ABC):
                     }
                 )
                 return
+            except SourceResolutionError as exc:
+                attempt += 1
+                last_error = f"source resolution failed: {exc}"
+                logger.warning("source resolver for %s failed: %s", self.channel.name, exc)
+                self._status = self._status.model_copy(
+                    update={
+                        "state": "restarting",
+                        "restart_count": self._status.restart_count + 1,
+                        "last_error": last_error,
+                        "pid": None,
+                    }
+                )
+                delay = self._backoff_seconds[min(attempt - 1, len(self._backoff_seconds) - 1)]
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                    break
+                except asyncio.TimeoutError:
+                    continue
             except Exception as exc:
                 self._status = self._status.model_copy(
                     update={"state": "error", "last_error": str(exc), "pid": None}
@@ -229,10 +260,14 @@ class BaseChannelWorker(ABC):
 
     def _common_ffmpeg_args(self) -> list[str]:
         input_args: list[str] = []
+        if self.channel.input_live_start_index is not None:
+            input_args.extend(["-live_start_index", str(self.channel.input_live_start_index)])
+
         tshttp = self._active_tshttp_settings()
         if tshttp is not None and tshttp.input_fflags:
             input_args.extend(["-fflags", tshttp.input_fflags])
 
+        resolved_source = self._active_resolved_source()
         copytb = str(tshttp.copytb) if tshttp is not None else "1"
         video_args = self._video_ffmpeg_args()
         audio_args = self._audio_ffmpeg_args()
@@ -255,16 +290,21 @@ class BaseChannelWorker(ABC):
             "15000000",
             *input_args,
             "-i",
-            self.channel.source_url,
+            resolved_source.url,
             "-map",
-            "0:v:0",
+            resolved_source.video_map,
             "-map",
-            "0:a:0?",
+            resolved_source.audio_map,
             "-copytb",
             copytb,
             *video_args,
             *audio_args,
         ]
+
+    def _active_resolved_source(self) -> ResolvedSource:
+        if self._resolved_source is None:
+            raise ValueError(f"channel '{self.channel.name}' source was not resolved")
+        return self._resolved_source
 
     def _ffmpeg_loglevel(self) -> str:
         return "warning" if self._settings.debug else "quiet"
@@ -296,6 +336,22 @@ class BaseChannelWorker(ABC):
                     [
                         "-b:v",
                         self.channel.transcoding.video_bitrate,
+                    ]
+                )
+            if self.channel.transcoding.video_fps is not None:
+                fps = self.channel.transcoding.video_fps
+                hls = self.channel.hls
+                gop = fps * (hls.segment_time if hls is not None else 4)
+                args.extend(
+                    [
+                        "-r",
+                        str(fps),
+                        "-g",
+                        str(gop),
+                        "-keyint_min",
+                        str(gop),
+                        "-sc_threshold",
+                        "0",
                     ]
                 )
             return args
@@ -388,6 +444,8 @@ class HlsChannelWorker(BaseChannelWorker):
             str(hls.segment_time),
             "-hls_list_size",
             str(hls.list_size),
+            "-hls_delete_threshold",
+            str(hls.delete_threshold),
             "-hls_flags",
             "delete_segments+omit_endlist+temp_file",
             "-hls_segment_filename",
@@ -471,6 +529,16 @@ class HlsChannelWorker(BaseChannelWorker):
                     f"HLS segment {latest_segment_name} has an audio stream but no audio packets; restarting",
                 )
                 return
+            if probe.audio_stream_present and (
+                probe.audio_packet_count is None
+                or probe.audio_sample_rate in (None, 0)
+                or probe.audio_channels in (None, 0)
+            ):
+                await self._terminate_for_health_failure(
+                    process,
+                    f"HLS segment {latest_segment_name} has an unreadable audio stream; restarting",
+                )
+                return
 
             if (
                 probe.first_video_pts is not None
@@ -527,7 +595,7 @@ class HlsChannelWorker(BaseChannelWorker):
                 "-select_streams",
                 "a:0",
                 "-show_entries",
-                "stream=nb_read_packets",
+                "stream=sample_rate,channels,nb_read_packets",
                 str(path),
             ]
         )
@@ -547,10 +615,19 @@ class HlsChannelWorker(BaseChannelWorker):
         audio_streams = audio_probe.get("streams", [])
         audio_stream_present = bool(audio_streams)
         audio_packet_count: int | None = None
+        audio_sample_rate: int | None = None
+        audio_channels: int | None = None
         if audio_stream_present:
-            packet_value = audio_streams[0].get("nb_read_packets")
+            audio_stream = audio_streams[0]
+            packet_value = audio_stream.get("nb_read_packets")
             if packet_value is not None:
                 audio_packet_count = int(packet_value)
+            sample_rate_value = audio_stream.get("sample_rate")
+            if sample_rate_value is not None:
+                audio_sample_rate = int(sample_rate_value)
+            channels_value = audio_stream.get("channels")
+            if channels_value is not None:
+                audio_channels = int(channels_value)
 
         packets = video_probe.get("packets", [])
         first_video_pts: float | None = None
@@ -563,6 +640,8 @@ class HlsChannelWorker(BaseChannelWorker):
             first_video_pts=first_video_pts,
             audio_stream_present=audio_stream_present,
             audio_packet_count=audio_packet_count,
+            audio_sample_rate=audio_sample_rate,
+            audio_channels=audio_channels,
         )
 
     async def _run_ffprobe_json(self, args: list[str]) -> dict[str, object]:
@@ -587,6 +666,14 @@ class HlsChannelWorker(BaseChannelWorker):
         self._last_stderr_lines = [reason]
         logger.warning("ffmpeg-%s: %s", self.channel.name, reason)
         process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ffmpeg-%s: process did not exit after health failure; killing",
+                self.channel.name,
+            )
+            process.kill()
 
     def _segment_number(self, segment_name: str) -> int | None:
         match = SEGMENT_NUMBER_PATTERN.fullmatch(segment_name)
@@ -611,6 +698,9 @@ class TshttpChannelWorker(BaseChannelWorker):
 
     def _stdout_target(self) -> int:
         return asyncio.subprocess.PIPE
+
+    def is_consumed(self) -> bool:
+        return self._active_consumer is not None
 
     async def open_stream(self) -> AsyncIterator[bytes]:
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=self._subscriber_queue_size)
@@ -770,6 +860,14 @@ class ChannelManager:
 
     def list_statuses(self) -> list[ChannelStatus]:
         return [self._workers[name].get_status() for name in sorted(self._workers)]
+
+    def count_active_channels(self) -> int:
+        return sum(
+            1 for worker in self._workers.values() if worker.get_status().state == "running"
+        )
+
+    def count_consumed_channels(self) -> int:
+        return sum(1 for worker in self._workers.values() if worker.is_consumed())
 
     def get_status(self, channel_name: str) -> ChannelStatus | None:
         worker = self._workers.get(channel_name)

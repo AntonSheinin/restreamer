@@ -42,6 +42,17 @@ class FileService:
     async def read_bytes(self, path: Path) -> bytes:
         return await asyncio.to_thread(path.read_bytes)
 
+    async def read_byte_range(self, path: Path, start: int, end: int) -> bytes:
+        def read_range() -> bytes:
+            with path.open("rb") as file:
+                file.seek(start)
+                return file.read(end - start + 1)
+
+        return await asyncio.to_thread(read_range)
+
+    async def file_size(self, path: Path) -> int:
+        return await asyncio.to_thread(lambda: path.stat().st_size)
+
     def resolve_hls_asset_path(self, channel_name: str, name: str) -> Path | None:
         if not self._asset_pattern.fullmatch(name):
             return None

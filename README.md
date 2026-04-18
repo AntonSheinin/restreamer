@@ -29,6 +29,7 @@ The container:
 
 - `DEBUG`: when `false`, app logs stay at `info` and ffmpeg runs with `-loglevel quiet`; when `true`, app logs include `debug` and ffmpeg runs with minimal ffmpeg warnings via `-loglevel warning`
 - `STREAMS_CONFIG`: startup path to `streams.toml`, default `streams.toml`
+- `ACCESS_TOKEN`: bearer token required for protected operational endpoints
 
 `streams.toml` contains the channel definitions. Example:
 
@@ -58,7 +59,48 @@ audio = "copy"
 [channels.kan23.hls]
 segment_time = 4
 list_size = 6
+delete_threshold = 30
+
+[channels.keshet12]
+source_type = "mako_keshet12"
+output_format = "hls"
+
+[channels.keshet12.input]
+stream = "clean"
+variant = "highest"
+
+[channels.keshet12.transcoding]
+video = "copy"
+audio = "transcode"
+
+[channels.keshet12.hls]
+segment_time = 4
+list_size = 30
+delete_threshold = 30
 ```
+
+`source_type` accepts:
+
+- `static`: default; ffmpeg reads `source_url` directly
+- `mako_keshet12`: resolves the official Keshet 12 live playlist and a short-lived Akamai ticket before starting ffmpeg
+
+For long live HLS playlists, `input_live_start_index = -3` can be set on a channel to make ffmpeg
+start near the live edge instead of reading from the beginning of the available window.
+
+For `mako_keshet12`, `input.stream` accepts:
+
+- `clean`: the main clean Keshet 12 feed
+- `clean_port`: portrait-oriented clean feed
+- `standard`: non-SSAI public player feed
+- `dvr`: DVR/SSAI public player feed
+
+`input.variant` accepts:
+
+- `highest`: choose the highest resolution advertised by the resolved HLS master
+- `720p`: choose a 720p variant if present, otherwise fall back to highest
+- `first`: choose the first advertised variant
+
+The official clean Keshet 12 master currently advertises up to `1280x720` at 25 fps. The resolver keeps the upstream Akamai ticket internal; downstream clients only see the local HLS output.
 
 `transcoding.video` and `transcoding.audio` accept:
 
@@ -71,8 +113,14 @@ Current ffmpeg behavior:
 - `video = "transcode"` uses `libx264`
 - `transcoding.video_width` and `transcoding.video_height` add a fixed `scale=W:H`
 - `transcoding.video_bitrate` adds `-b:v`
+- `transcoding.video_fps` adds a fixed frame rate and matching GOP for stable HLS segments
 - `audio = "copy"` uses `-c:a copy`
 - `audio = "transcode"` uses AAC with the existing resample settings
+
+For Flussonic pull ingest, keep a larger HLS window than a browser player needs. `hls.list_size`
+controls how many segments are advertised in the playlist, and `hls.delete_threshold` keeps old
+segments on disk briefly after they leave the playlist so a downstream probe does not race segment
+cleanup.
 
 ## Output URLs
 
@@ -90,13 +138,23 @@ http://<host>:8092/channels/kan23/hls/index.m3u8
 
 ## Endpoints
 
-- `GET /health`
+- `GET /health` protected
+- `GET /stats` protected; returns `active_channels`, the count of channels currently in `running` state, and `consumed_channels`, the count of channels with a connected TSHTTP client
 - `GET /channels`
 - `GET /channels/{channel}`
 - `POST /channels/{channel}/reload`
+- `GET /channels/{channel}/hls`
 - `GET /channels/{channel}/hls/index.m3u8`
 - `GET /channels/{channel}/hls/{asset_name}`
 - `GET /channels/{channel}/stream.ts`
+
+The HLS endpoints also support `HEAD`; segment requests support single HTTP byte ranges.
+
+Protected endpoints require:
+
+```text
+Authorization: Bearer <ACCESS_TOKEN>
+```
 
 `POST /channels/{channel}/reload` reloads a single channel from `streams.toml` without restarting the app. This lets you edit one channel definition and apply it from Swagger UI immediately.
 

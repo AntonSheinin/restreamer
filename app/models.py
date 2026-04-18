@@ -7,6 +7,11 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
+class StatsResponse(BaseModel):
+    active_channels: int
+    consumed_channels: int
+
+
 class ChannelStatus(BaseModel):
     channel: str
     output_format: Literal["hls", "tshttp"]

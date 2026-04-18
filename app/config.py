@@ -3,7 +3,7 @@ import re
 import tomllib
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 FFMPEG_PATH = Path("/usr/bin/ffmpeg")
@@ -14,6 +14,21 @@ CHANNEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 class HlsChannelConfig(BaseModel):
     segment_time: int = Field(4, ge=1)
     list_size: int = Field(6, ge=2)
+    delete_threshold: int = Field(30, ge=1)
+
+
+class MakoKeshet12InputConfig(BaseModel):
+    stream: Literal["clean", "clean_port", "standard", "dvr"] = "clean"
+    variant: Literal["first", "highest", "720p"] = "highest"
+    variant_index: int | None = Field(None, ge=0)
+    device_id: str | None = None
+    app_version: str = "7.11.0"
+    consumer: str = "responsive"
+    channel_id: str = "5d28d21b4580e310VgnVCM2000002a0c10acRCRD"
+    vcmid: str = "6540b8dcb64fd310VgnVCM2000002a0c10acRCRD"
+    gallery_channel_id: str = "6540b8dcb64fd310VgnVCM2000002a0c10acRCRD"
+    playlist_url: str = "https://www.mako.co.il/AjaxPage?jspName=playlist12.jsp"
+    entitlement_url: str = "https://mass.mako.co.il/ClicksStatistics/entitlementsServicesV2.jsp?et=egt"
 
 
 class TranscodingConfig(BaseModel):
@@ -22,14 +37,19 @@ class TranscodingConfig(BaseModel):
     video_width: int | None = Field(None, ge=1)
     video_height: int | None = Field(None, ge=1)
     video_bitrate: str | None = None
+    video_fps: int | None = Field(None, ge=1)
 
     @model_validator(mode="after")
     def validate_video_transcode_settings(self) -> "TranscodingConfig":
         has_dimensions = self.video_width is not None or self.video_height is not None
         if has_dimensions and (self.video_width is None or self.video_height is None):
             raise ValueError("transcoding.video_width and transcoding.video_height must be set together")
-        if self.video == "copy" and (has_dimensions or self.video_bitrate is not None):
-            raise ValueError("video_width, video_height, and video_bitrate require transcoding.video = 'transcode'")
+        if self.video == "copy" and (
+            has_dimensions or self.video_bitrate is not None or self.video_fps is not None
+        ):
+            raise ValueError(
+                "video_width, video_height, video_bitrate, and video_fps require transcoding.video = 'transcode'"
+            )
         return self
 
 
@@ -42,8 +62,11 @@ class TshttpChannelConfig(BaseModel):
 
 class ChannelConfig(BaseModel):
     name: str
-    source_url: str
+    source_url: str | None = None
+    source_type: Literal["static", "mako_keshet12"] = "static"
+    input_live_start_index: int | None = None
     output_format: Literal["hls", "tshttp"]
+    input: MakoKeshet12InputConfig | None = None
     transcoding: TranscodingConfig = Field(default_factory=TranscodingConfig)
     hls: HlsChannelConfig | None = None
     tshttp: TshttpChannelConfig | None = None
@@ -57,6 +80,10 @@ class ChannelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_output_settings(self) -> "ChannelConfig":
+        if self.source_type == "static" and not self.source_url:
+            raise ValueError("source_url is required when source_type = 'static'")
+        if self.source_type == "mako_keshet12":
+            self.input = self.input or MakoKeshet12InputConfig()
         if self.output_format == "hls":
             self.hls = self.hls or HlsChannelConfig()
         else:
@@ -71,6 +98,7 @@ class StreamsConfig(BaseModel):
 class Settings(BaseSettings):
     debug: bool = Field(False, alias="DEBUG")
     streams_config: Path = Field(Path("streams.toml"), alias="STREAMS_CONFIG")
+    access_token: SecretStr | None = Field(None, alias="ACCESS_TOKEN")
 
     model_config = SettingsConfigDict(
         env_file=".env",
