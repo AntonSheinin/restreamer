@@ -116,6 +116,7 @@ class BaseChannelWorker(ABC):
                     stderr=asyncio.subprocess.PIPE,
                 )
             except FileNotFoundError:
+                logger.exception("ffmpeg executable not found for %s: %s", self.channel.name, FFMPEG_PATH)
                 self._status = self._status.model_copy(
                     update={
                         "state": "error",
@@ -143,6 +144,7 @@ class BaseChannelWorker(ABC):
                 except asyncio.TimeoutError:
                     continue
             except Exception as exc:
+                logger.exception("ffmpeg worker for %s failed before start", self.channel.name)
                 self._status = self._status.model_copy(
                     update={"state": "error", "last_error": str(exc), "pid": None}
                 )

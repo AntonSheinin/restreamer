@@ -127,26 +127,26 @@ cleanup.
 TSHTTP channel:
 
 ```text
-tshttp://<host>:8092/channels/kan11/stream.ts
+http://<host>:8092/channels/kan11/stream.ts?access_token=<ACCESS_TOKEN>
 ```
 
 HLS channel:
 
 ```text
-http://<host>:8092/channels/kan23/hls/index.m3u8
+http://<host>:8092/channels/kan23/hls/index.m3u8?access_token=<ACCESS_TOKEN>
 ```
 
 ## Endpoints
 
 - `GET /health` protected
 - `GET /stats` protected; returns `active_channels`, the count of channels currently in `running` state, and `consumed_channels`, the count of channels with a connected TSHTTP client
-- `GET /channels`
-- `GET /channels/{channel}`
-- `POST /channels/{channel}/reload`
-- `GET /channels/{channel}/hls`
-- `GET /channels/{channel}/hls/index.m3u8`
-- `GET /channels/{channel}/hls/{asset_name}`
-- `GET /channels/{channel}/stream.ts`
+- `GET /channels` protected
+- `GET /channels/{channel}` protected
+- `POST /channels/{channel}/reload` protected
+- `GET /channels/{channel}/hls` protected
+- `GET /channels/{channel}/hls/index.m3u8` protected
+- `GET /channels/{channel}/hls/{asset_name}` protected
+- `GET /channels/{channel}/stream.ts` protected
 
 The HLS endpoints also support `HEAD`; segment requests support single HTTP byte ranges.
 
@@ -155,6 +155,14 @@ Protected endpoints require:
 ```text
 Authorization: Bearer <ACCESS_TOKEN>
 ```
+
+They also accept the same token in the URL:
+
+```text
+?access_token=<ACCESS_TOKEN>
+```
+
+For HLS playback, use the query parameter on the playlist URL. The service adds it to segment URLs inside the playlist so clients can fetch each segment.
 
 `POST /channels/{channel}/reload` reloads a single channel from `streams.toml` without restarting the app. This lets you edit one channel definition and apply it from Swagger UI immediately.
 
