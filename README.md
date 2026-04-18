@@ -22,6 +22,7 @@ The container:
 - installs Python dependencies with `uv`
 - exposes the service on port `8092`
 - starts one ffmpeg worker per configured channel
+- stores generated HLS playlists and segments in a Docker named volume mounted at `/app/runtime`
 
 ## Configuration
 

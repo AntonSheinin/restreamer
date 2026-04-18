@@ -11,5 +11,8 @@ services:
     ports:
       - "8092:8092"
     volumes:
-      - ./runtime:/app/runtime
+      - runtime:/app/runtime
       - ./streams.toml:/app/streams.toml:ro
+
+volumes:
+  runtime:
