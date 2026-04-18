@@ -274,7 +274,7 @@ class BaseChannelWorker(ABC):
         video_args = self._video_ffmpeg_args()
         audio_args = self._audio_ffmpeg_args()
 
-        return [
+        command = [
             str(FFMPEG_PATH),
             "-nostdin",
             "-hide_banner",
@@ -282,26 +282,40 @@ class BaseChannelWorker(ABC):
             self._ffmpeg_loglevel(),
             "-stats_period",
             "5",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "10",
-            "-rw_timeout",
-            "15000000",
-            *input_args,
-            "-i",
-            resolved_source.url,
-            "-map",
-            resolved_source.video_map,
-            "-map",
-            resolved_source.audio_map,
-            "-copytb",
-            copytb,
-            *video_args,
-            *audio_args,
         ]
+        if self._settings.ffmpeg_threads:
+            command.extend(
+                [
+                    "-filter_threads",
+                    str(self._settings.ffmpeg_threads),
+                    "-filter_complex_threads",
+                    str(self._settings.ffmpeg_threads),
+                ]
+            )
+        command.extend(
+            [
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "10",
+                "-rw_timeout",
+                "15000000",
+                *input_args,
+                "-i",
+                resolved_source.url,
+                "-map",
+                resolved_source.video_map,
+                "-map",
+                resolved_source.audio_map,
+                "-copytb",
+                copytb,
+                *video_args,
+                *audio_args,
+            ]
+        )
+        return command
 
     def _active_resolved_source(self) -> ResolvedSource:
         if self._resolved_source is None:

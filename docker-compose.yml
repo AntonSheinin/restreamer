@@ -9,7 +9,7 @@ services:
     cpus: "${RESTREAMER_CPUS:-6.0}"
     mem_limit: "${RESTREAMER_MEMORY:-4g}"
     memswap_limit: "${RESTREAMER_MEMORY_SWAP:-4g}"
-    pids_limit: ${RESTREAMER_PIDS_LIMIT:-128}
+    pids_limit: ${RESTREAMER_PIDS_LIMIT:-512}
     stop_grace_period: ${RESTREAMER_STOP_GRACE_PERIOD:-30s}
     ulimits:
       nofile:
