@@ -356,6 +356,8 @@ class BaseChannelWorker(ABC):
                         "0",
                     ]
                 )
+            if self._settings.ffmpeg_threads:
+                args.extend(["-threads:v", str(self._settings.ffmpeg_threads)])
             return args
 
         return [

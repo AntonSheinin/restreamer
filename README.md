@@ -31,6 +31,31 @@ The container:
 - `DEBUG`: when `false`, app logs stay at `info` and ffmpeg runs with `-loglevel quiet`; when `true`, app logs include `debug` and ffmpeg runs with minimal ffmpeg warnings via `-loglevel warning`
 - `STREAMS_CONFIG`: startup path to `streams.toml`, default `streams.toml`
 - `ACCESS_TOKEN`: bearer token required for protected operational endpoints
+- `FFMPEG_THREADS`: limits libx264 video encoder threads per transcoding worker; `0` lets ffmpeg choose automatically
+
+The same `.env` file is also used by Docker Compose for host/container limits:
+
+- `RESTREAMER_BIND_HOST`: host interface for port publishing. Use `127.0.0.1` when Flussonic runs on the same server.
+- `RESTREAMER_PORT`: host port mapped to container port `8092`
+- `RESTREAMER_CPUS`: maximum CPU cores available to the container
+- `RESTREAMER_MEMORY`: container memory limit
+- `RESTREAMER_MEMORY_SWAP`: total memory plus swap limit. Set equal to `RESTREAMER_MEMORY` to avoid container swap growth.
+- `RESTREAMER_PIDS_LIMIT`: maximum processes/threads in the container
+- `RESTREAMER_STOP_GRACE_PERIOD`: time Compose gives the app to stop before SIGKILL
+- `RESTREAMER_NOFILE_SOFT` / `RESTREAMER_NOFILE_HARD`: open-file limits
+
+For a shared Flussonic host, start conservatively:
+
+```env
+RESTREAMER_BIND_HOST=127.0.0.1
+RESTREAMER_CPUS=6.0
+RESTREAMER_MEMORY=4g
+RESTREAMER_MEMORY_SWAP=4g
+RESTREAMER_PIDS_LIMIT=128
+FFMPEG_THREADS=2
+```
+
+Raise these only after watching Flussonic scheduler/load metrics and `docker stats`.
 
 `streams.toml` contains the channel definitions. Example:
 
@@ -115,6 +140,7 @@ Current ffmpeg behavior:
 - `transcoding.video_width` and `transcoding.video_height` add a fixed `scale=W:H`
 - `transcoding.video_bitrate` adds `-b:v`
 - `transcoding.video_fps` adds a fixed frame rate and matching GOP for stable HLS segments
+- `FFMPEG_THREADS > 0` adds `-threads:v <value>` to video transcode workers
 - `audio = "copy"` uses `-c:a copy`
 - `audio = "transcode"` uses AAC with the existing resample settings
 

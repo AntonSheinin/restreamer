@@ -6,10 +6,19 @@ services:
       context: .
     container_name: restreamer
     restart: unless-stopped
+    cpus: "${RESTREAMER_CPUS:-6.0}"
+    mem_limit: "${RESTREAMER_MEMORY:-4g}"
+    memswap_limit: "${RESTREAMER_MEMORY_SWAP:-4g}"
+    pids_limit: ${RESTREAMER_PIDS_LIMIT:-128}
+    stop_grace_period: ${RESTREAMER_STOP_GRACE_PERIOD:-30s}
+    ulimits:
+      nofile:
+        soft: ${RESTREAMER_NOFILE_SOFT:-8192}
+        hard: ${RESTREAMER_NOFILE_HARD:-8192}
     env_file:
       - .env
     ports:
-      - "8092:8092"
+      - "${RESTREAMER_BIND_HOST:-127.0.0.1}:${RESTREAMER_PORT:-8092}:8092"
     volumes:
       - runtime:/app/runtime
       - ./streams.toml:/app/streams.toml:ro

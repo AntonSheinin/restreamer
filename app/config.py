@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     debug: bool = Field(False, alias="DEBUG")
     streams_config: Path = Field(Path("streams.toml"), alias="STREAMS_CONFIG")
     access_token: SecretStr | None = Field(None, alias="ACCESS_TOKEN")
+    ffmpeg_threads: int = Field(0, ge=0, alias="FFMPEG_THREADS")
 
     model_config = SettingsConfigDict(
         env_file=".env",
