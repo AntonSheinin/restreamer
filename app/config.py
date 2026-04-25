@@ -69,6 +69,8 @@ class ChannelConfig(BaseModel):
     name: str
     source_url: str | None = None
     source_type: Literal["static", "mako_keshet12"] = "static"
+    input_video_stream_index: int = Field(0, ge=0)
+    input_audio_stream_index: int = Field(0, ge=0)
     input_live_start_index: int | None = None
     output_format: Literal["hls", "tshttp"]
     input: MakoKeshet12InputConfig | None = None

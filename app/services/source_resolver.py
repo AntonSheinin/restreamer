@@ -57,7 +57,11 @@ class StaticSourceResolver(SourceResolver):
     async def resolve(self) -> ResolvedSource:
         if not self._channel.source_url:
             raise SourceResolutionError(f"channel '{self._channel.name}' missing source_url")
-        return ResolvedSource(url=self._channel.source_url)
+        return ResolvedSource(
+            url=self._channel.source_url,
+            video_map=f"0:v:{self._channel.input_video_stream_index}",
+            audio_map=f"0:a:{self._channel.input_audio_stream_index}?",
+        )
 
 
 class MakoKeshet12Resolver(SourceResolver):

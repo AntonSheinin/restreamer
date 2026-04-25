@@ -1,5 +1,6 @@
 [channels.kan11]
 source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/kan11/live.livx"
+input_video_stream_index = 1
 output_format = "hls"
 
 [channels.kan11.transcoding]

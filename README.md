@@ -66,6 +66,7 @@ Raise these only after watching Flussonic scheduler/load metrics and `docker sta
 ```toml
 [channels.kan11]
 source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/kan11/live.livx"
+input_video_stream_index = 1
 output_format = "tshttp"
 
 [channels.kan11.transcoding]
@@ -123,6 +124,9 @@ probe_interval_segments = 30
 
 For long live HLS playlists, `input_live_start_index = -3` can be set on a channel to make ffmpeg
 start near the live edge instead of reading from the beginning of the available window.
+
+For static sources that expose multiple video or audio streams, `input_video_stream_index` and
+`input_audio_stream_index` select which input streams ffmpeg maps. Both default to `0`.
 
 For `mako_keshet12`, `input.stream` accepts:
 
