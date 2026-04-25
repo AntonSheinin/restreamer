@@ -519,6 +519,8 @@ class HlsChannelWorker(BaseChannelWorker):
 
         return [
             *self._common_ffmpeg_args(),
+            "-mpegts_flags",
+            "resend_headers",
             "-f",
             "hls",
             "-hls_time",
