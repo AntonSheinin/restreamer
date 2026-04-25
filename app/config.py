@@ -15,6 +15,8 @@ class HlsChannelConfig(BaseModel):
     segment_time: int = Field(4, ge=1)
     list_size: int = Field(6, ge=2)
     delete_threshold: int = Field(30, ge=1)
+    probe_mode: Literal["off", "periodic", "every_segment"] = "off"
+    probe_interval_segments: int = Field(30, ge=1)
 
 
 class MakoKeshet12InputConfig(BaseModel):
@@ -58,6 +60,9 @@ class TshttpChannelConfig(BaseModel):
     input_fflags: str | None = None
     copytb: Literal[0, 1] = 1
     mpegts_copyts: bool = True
+    queue_size: int = Field(32, ge=1)
+    chunk_size: int = Field(64 * 1024, ge=1)
+    consumer_write_timeout_seconds: int = Field(10, ge=1)
 
 
 class ChannelConfig(BaseModel):
@@ -100,6 +105,8 @@ class Settings(BaseSettings):
     streams_config: Path = Field(Path("streams.toml"), alias="STREAMS_CONFIG")
     access_token: SecretStr | None = Field(None, alias="ACCESS_TOKEN")
     ffmpeg_threads: int = Field(0, ge=0, alias="FFMPEG_THREADS")
+    worker_start_stagger_seconds: float = Field(2, ge=0, alias="WORKER_START_STAGGER_SECONDS")
+    max_concurrent_worker_starts: int = Field(2, ge=1, alias="MAX_CONCURRENT_WORKER_STARTS")
 
     model_config = SettingsConfigDict(
         env_file=".env",

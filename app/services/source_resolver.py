@@ -6,7 +6,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives import padding
@@ -23,6 +23,7 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 20
 STREAM_INF_PATTERN = re.compile(r"#EXT-X-STREAM-INF:(?P<attrs>.*)", re.IGNORECASE)
 RESOLUTION_PATTERN = re.compile(r"RESOLUTION=(?P<width>\d+)x(?P<height>\d+)", re.IGNORECASE)
 BANDWIDTH_PATTERN = re.compile(r"(?:^|,)BANDWIDTH=(?P<bandwidth>\d+)", re.IGNORECASE)
+URL_TEXT_PATTERN = re.compile(r"https?://\S+")
 
 
 class SourceResolutionError(RuntimeError):
@@ -186,6 +187,18 @@ def build_source_resolver(channel: ChannelConfig) -> SourceResolver:
     return StaticSourceResolver(channel)
 
 
+def _redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return url
+    query = "redacted" if parsed.query else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+
+def _redact_text_urls(value: str) -> str:
+    return URL_TEXT_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
+
+
 def _fetch_text(
     url: str,
     method: str = "GET",
@@ -205,10 +218,12 @@ def _fetch_text(
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read().decode(charset, errors="replace")
     except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise SourceResolutionError(f"HTTP {exc.code} while fetching {url}: {detail}") from exc
+        detail = _redact_text_urls(exc.read().decode("utf-8", errors="replace")[:300])
+        raise SourceResolutionError(
+            f"HTTP {exc.code} while fetching {_redact_url(url)}: {detail}"
+        ) from exc
     except URLError as exc:
-        raise SourceResolutionError(f"failed to fetch {url}: {exc.reason}") from exc
+        raise SourceResolutionError(f"failed to fetch {_redact_url(url)}: {exc.reason}") from exc
 
 
 def _aes_decrypt(ciphertext: str, key: str) -> str:
@@ -243,7 +258,7 @@ def _decode_ticket_response(encrypted_response: str) -> dict[str, object]:
 def _first_ticket(ticket_response: dict[str, object]) -> str:
     tickets = ticket_response.get("tickets")
     if not isinstance(tickets, list) or not tickets:
-        raise SourceResolutionError(f"mako ticket response has no tickets: {ticket_response!r}")
+        raise SourceResolutionError("mako ticket response has no tickets")
     first = tickets[0]
     if not isinstance(first, dict) or not isinstance(first.get("ticket"), str):
         raise SourceResolutionError("mako ticket response has invalid ticket")

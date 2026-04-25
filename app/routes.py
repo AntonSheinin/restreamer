@@ -191,7 +191,7 @@ async def hls_playlist(
         raise _playlist_not_ready(status_model)
 
     try:
-        content = await file_service.read_bytes(playlist_path)
+        content = await file_service.read_cached_playlist(playlist_path)
     except FileNotFoundError as exc:
         raise _playlist_not_ready(status_model) from exc
 
@@ -259,24 +259,22 @@ async def hls_asset(
     if byte_range is not None:
         start, end = byte_range
         try:
-            content = await file_service.read_byte_range(asset_path, start, end)
+            file = await file_service.open_binary(asset_path)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
-
-        return Response(
-            content=content,
+        return StreamingResponse(
+            file_service.iter_byte_range(file, start, end),
             media_type="video/mp2t",
             headers=_range_headers("no-cache", size, start, end),
             status_code=status.HTTP_206_PARTIAL_CONTENT,
         )
 
     try:
-        content = await file_service.read_bytes(asset_path)
+        file = await file_service.open_binary(asset_path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found") from exc
-
-    return Response(
-        content=content,
+    return StreamingResponse(
+        file_service.iter_file(file),
         media_type="video/mp2t",
         headers=_cache_headers("no-cache", size),
     )

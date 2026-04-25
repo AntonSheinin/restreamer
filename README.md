@@ -32,6 +32,8 @@ The container:
 - `STREAMS_CONFIG`: startup path to `streams.toml`, default `streams.toml`
 - `ACCESS_TOKEN`: bearer token required for protected operational endpoints
 - `FFMPEG_THREADS`: limits libx264 video encoder and filter threads per transcoding worker; `0` lets ffmpeg choose automatically
+- `WORKER_START_STAGGER_SECONDS`: minimum delay between ffmpeg start attempts across all workers, default `2`
+- `MAX_CONCURRENT_WORKER_STARTS`: maximum workers allowed to resolve sources and start ffmpeg at the same time, default `2`
 
 The same `.env` file is also used by Docker Compose for host/container limits:
 
@@ -53,6 +55,8 @@ RESTREAMER_MEMORY=4g
 RESTREAMER_MEMORY_SWAP=4g
 RESTREAMER_PIDS_LIMIT=512
 FFMPEG_THREADS=2
+WORKER_START_STAGGER_SECONDS=2
+MAX_CONCURRENT_WORKER_STARTS=2
 ```
 
 Raise these only after watching Flussonic scheduler/load metrics and `docker stats`.
@@ -73,6 +77,9 @@ video_bitrate = "2800k"
 
 [channels.kan11.tshttp]
 stale_output_seconds = 15
+queue_size = 32
+chunk_size = 65536
+consumer_write_timeout_seconds = 10
 
 [channels.kan23]
 source_url = "https://example.invalid/live/kan23/live.livx"
@@ -86,6 +93,8 @@ audio = "copy"
 segment_time = 4
 list_size = 6
 delete_threshold = 30
+probe_mode = "off"
+probe_interval_segments = 30
 
 [channels.keshet12]
 source_type = "mako_keshet12"
@@ -103,6 +112,8 @@ audio = "transcode"
 segment_time = 4
 list_size = 30
 delete_threshold = 30
+probe_mode = "off"
+probe_interval_segments = 30
 ```
 
 `source_type` accepts:
@@ -148,6 +159,16 @@ For Flussonic pull ingest, keep a larger HLS window than a browser player needs.
 controls how many segments are advertised in the playlist, and `hls.delete_threshold` keeps old
 segments on disk briefly after they leave the playlist so a downstream probe does not race segment
 cleanup.
+
+HLS playlist advancement checks are always enabled. Expensive media probing is controlled by
+`hls.probe_mode`:
+
+- `off`: default; no per-segment ffprobe work
+- `periodic`: probe every `hls.probe_interval_segments` new segments
+- `every_segment`: strict diagnostic mode matching the older per-segment probe behavior
+
+Segment GET responses are streamed from disk and byte-range responses stream only the requested
+range, while preserving the existing HLS headers and status codes.
 
 ## Output URLs
 
@@ -199,3 +220,5 @@ For HLS playback, use the query parameter on the playlist URL. The service adds 
 - If the app fails on startup, verify that `/app/streams.toml` exists and defines at least one channel.
 - If a worker keeps restarting, verify that the channel `source_url` points to a reachable DASH MPD that `ffmpeg` can read.
 - TSHTTP channels allow only one active client per channel at a time. A second client receives `409 Conflict`.
+- TSHTTP output uses a bounded queue. If a connected client stops reading for longer than
+  `tshttp.consumer_write_timeout_seconds`, the worker restarts instead of dropping MPEG-TS chunks.

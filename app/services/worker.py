@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from asyncio.subprocess import Process
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from app.config import (
     ChannelConfig,
@@ -26,10 +27,55 @@ from app.services.source_resolver import (
 
 logger = logging.getLogger("uvicorn.error")
 SEGMENT_NUMBER_PATTERN = re.compile(r"segment_(\d+)\.ts$")
+URL_TEXT_PATTERN = re.compile(r"https?://\S+")
 
 
 class ActiveStreamConflict(Exception):
     pass
+
+
+def _redact_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return value
+    query = "redacted" if parsed.query else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+
+def _redact_command(command: list[str]) -> list[str]:
+    return [_redact_url(part) for part in command]
+
+
+def _redact_text_urls(value: str) -> str:
+    return URL_TEXT_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
+
+
+class WorkerStartGate:
+    def __init__(self, max_concurrent_starts: int, stagger_seconds: float) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent_starts)
+        self._stagger_seconds = stagger_seconds
+        self._stagger_lock = asyncio.Lock()
+        self._last_start_at: float | None = None
+
+    @contextlib.asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        await self._semaphore.acquire()
+        try:
+            await self._wait_for_stagger()
+            yield
+        finally:
+            self._semaphore.release()
+
+    async def _wait_for_stagger(self) -> None:
+        if self._stagger_seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._stagger_lock:
+            if self._last_start_at is not None:
+                delay = self._stagger_seconds - (loop.time() - self._last_start_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            self._last_start_at = loop.time()
 
 
 @dataclass
@@ -50,10 +96,12 @@ class BaseChannelWorker(ABC):
         channel: ChannelConfig,
         settings: Settings,
         file_service: FileService,
+        start_gate: WorkerStartGate,
     ) -> None:
         self.channel = channel
         self._settings = settings
         self._file_service = file_service
+        self._start_gate = start_gate
         self._process: Process | None = None
         self._supervisor_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -101,20 +149,23 @@ class BaseChannelWorker(ABC):
             self._last_stderr_lines = []
 
             try:
-                await self._before_start()
-                self._resolved_source = await self._source_resolver.resolve()
-                command = self._build_ffmpeg_command()
-                logger.info("starting ffmpeg worker for %s", self.channel.name)
-                logger.debug(
-                    "ffmpeg command for %s: %s",
-                    self.channel.name,
-                    " ".join(command),
-                )
-                self._process = await asyncio.create_subprocess_exec(
-                    *command,
-                    stdout=self._stdout_target(),
-                    stderr=asyncio.subprocess.PIPE,
-                )
+                async with self._start_gate.slot():
+                    if self._stop_event.is_set():
+                        break
+                    await self._before_start()
+                    self._resolved_source = await self._source_resolver.resolve()
+                    command = self._build_ffmpeg_command()
+                    logger.info("starting ffmpeg worker for %s", self.channel.name)
+                    logger.debug(
+                        "ffmpeg command for %s: %s",
+                        self.channel.name,
+                        " ".join(_redact_command(command)),
+                    )
+                    self._process = await asyncio.create_subprocess_exec(
+                        *command,
+                        stdout=self._stdout_target(),
+                        stderr=asyncio.subprocess.PIPE,
+                    )
             except FileNotFoundError:
                 logger.exception("ffmpeg executable not found for %s: %s", self.channel.name, FFMPEG_PATH)
                 self._status = self._status.model_copy(
@@ -127,8 +178,12 @@ class BaseChannelWorker(ABC):
                 return
             except SourceResolutionError as exc:
                 attempt += 1
-                last_error = f"source resolution failed: {exc}"
-                logger.warning("source resolver for %s failed: %s", self.channel.name, exc)
+                last_error = f"source resolution failed: {_redact_text_urls(str(exc))}"
+                logger.warning(
+                    "source resolver for %s failed: %s",
+                    self.channel.name,
+                    _redact_text_urls(str(exc)),
+                )
                 self._status = self._status.model_copy(
                     update={
                         "state": "restarting",
@@ -146,7 +201,7 @@ class BaseChannelWorker(ABC):
             except Exception as exc:
                 logger.exception("ffmpeg worker for %s failed before start", self.channel.name)
                 self._status = self._status.model_copy(
-                    update={"state": "error", "last_error": str(exc), "pid": None}
+                    update={"state": "error", "last_error": _redact_text_urls(str(exc)), "pid": None}
                 )
                 return
 
@@ -212,6 +267,7 @@ class BaseChannelWorker(ABC):
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue
+            text = _redact_text_urls(text)
             logger.debug("ffmpeg-%s: %s", self.channel.name, text)
             last_lines.append(text)
             if len(last_lines) > 5:
@@ -414,14 +470,21 @@ class HlsChannelWorker(BaseChannelWorker):
     _playlist_poll_seconds = 1
     _playlist_stale_floor_seconds = 30
     _segment_pts_jump_floor_seconds = 30
+    _ffprobe_timeout_seconds = 5
 
     def __init__(
         self,
         channel: ChannelConfig,
         settings: Settings,
         file_service: FileService,
+        start_gate: WorkerStartGate,
     ) -> None:
-        super().__init__(channel=channel, settings=settings, file_service=file_service)
+        super().__init__(
+            channel=channel,
+            settings=settings,
+            file_service=file_service,
+            start_gate=start_gate,
+        )
         self._last_playlist_segment_number: int | None = None
         self._last_playlist_advanced_at: float | None = None
         self._last_checked_segment_number: int | None = None
@@ -531,6 +594,9 @@ class HlsChannelWorker(BaseChannelWorker):
             if segment_path is None:
                 continue
 
+            if not self._should_probe_hls_segment(latest_segment_number):
+                continue
+
             try:
                 probe = await self._probe_hls_segment(segment_path)
             except Exception as exc:
@@ -579,6 +645,16 @@ class HlsChannelWorker(BaseChannelWorker):
             self._last_checked_segment_number = latest_segment_number
             self._last_checked_segment_pts = probe.first_video_pts
             self._last_checked_segment_duration = latest_segment_duration
+
+    def _should_probe_hls_segment(self, latest_segment_number: int) -> bool:
+        hls = self.channel.hls
+        if hls is None or hls.probe_mode == "off":
+            return False
+        if hls.probe_mode == "every_segment":
+            return latest_segment_number != self._last_checked_segment_number
+        if self._last_checked_segment_number is None:
+            return True
+        return latest_segment_number - self._last_checked_segment_number >= hls.probe_interval_segments
 
     def _parse_playlist(self, playlist: str) -> tuple[int, list[tuple[str, float]]] | None:
         media_sequence: int | None = None
@@ -674,7 +750,17 @@ class HlsChannelWorker(BaseChannelWorker):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self._ffprobe_timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(
+                f"ffprobe timed out after {self._ffprobe_timeout_seconds}s for {self.channel.name}"
+            ) from exc
         if process.returncode != 0:
             error_text = stderr.decode("utf-8", errors="replace").strip() or "unknown ffprobe error"
             raise RuntimeError(f"ffprobe failed for {self.channel.name}: {error_text}")
@@ -701,15 +787,19 @@ class HlsChannelWorker(BaseChannelWorker):
 
 
 class TshttpChannelWorker(BaseChannelWorker):
-    _subscriber_queue_size = 32
-
     def __init__(
         self,
         channel: ChannelConfig,
         settings: Settings,
         file_service: FileService,
+        start_gate: WorkerStartGate,
     ) -> None:
-        super().__init__(channel=channel, settings=settings, file_service=file_service)
+        super().__init__(
+            channel=channel,
+            settings=settings,
+            file_service=file_service,
+            start_gate=start_gate,
+        )
         self._active_consumer: asyncio.Queue[bytes | None] | None = None
         self._consumer_guard = asyncio.Lock()
         self._last_output_at: float | None = None
@@ -721,7 +811,8 @@ class TshttpChannelWorker(BaseChannelWorker):
         return self._active_consumer is not None
 
     async def open_stream(self) -> AsyncIterator[bytes]:
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=self._subscriber_queue_size)
+        queue_size = self.channel.tshttp.queue_size if self.channel.tshttp is not None else 32
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=queue_size)
         async with self._consumer_guard:
             if self._active_consumer is not None:
                 raise ActiveStreamConflict("channel already has an active consumer")
@@ -757,19 +848,36 @@ class TshttpChannelWorker(BaseChannelWorker):
         async with self._consumer_guard:
             queue = self._active_consumer
         if queue is not None:
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
+            if queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            queue.put_nowait(None)
 
     async def _consume_stdout(self, process: Process, loop: asyncio.AbstractEventLoop) -> None:
         if process.stdout is None:
             return
 
         while True:
-            chunk = await process.stdout.read(64 * 1024)
+            tshttp = self.channel.tshttp
+            chunk_size = tshttp.chunk_size if tshttp is not None else 64 * 1024
+            chunk = await process.stdout.read(chunk_size)
             if not chunk:
                 break
             self._last_output_at = loop.time()
-            await self._broadcast_chunk(chunk)
+            try:
+                await self._broadcast_chunk(chunk)
+            except asyncio.TimeoutError:
+                timeout_seconds = (
+                    self.channel.tshttp.consumer_write_timeout_seconds
+                    if self.channel.tshttp is not None
+                    else 10
+                )
+                self._last_stderr_lines = [
+                    f"MPEG-TS consumer blocked for {timeout_seconds}s; restarting"
+                ]
+                logger.warning("ffmpeg-%s: %s", self.channel.name, self._last_stderr_lines[0])
+                process.terminate()
+                return
 
     async def _watch_output_staleness(
         self,
@@ -801,12 +909,12 @@ class TshttpChannelWorker(BaseChannelWorker):
         if queue is None:
             return
 
-        try:
-            if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(chunk)
-        except asyncio.QueueEmpty:
-            queue.put_nowait(chunk)
+        timeout_seconds = (
+            self.channel.tshttp.consumer_write_timeout_seconds
+            if self.channel.tshttp is not None
+            else 10
+        )
+        await asyncio.wait_for(queue.put(chunk), timeout=timeout_seconds)
 
     def _build_ffmpeg_command(self) -> list[str]:
         tshttp = self.channel.tshttp
@@ -842,6 +950,10 @@ class ChannelManager:
         self._settings = settings
         self._file_service = file_service
         self._channels = {channel.name: channel for channel in channels}
+        self._start_gate = WorkerStartGate(
+            max_concurrent_starts=settings.max_concurrent_worker_starts,
+            stagger_seconds=settings.worker_start_stagger_seconds,
+        )
         self._workers: dict[str, BaseChannelWorker] = {
             channel.name: self._build_worker(channel) for channel in channels
         }
@@ -908,9 +1020,11 @@ class ChannelManager:
                 channel=channel,
                 settings=self._settings,
                 file_service=self._file_service,
+                start_gate=self._start_gate,
             )
         return TshttpChannelWorker(
             channel=channel,
             settings=self._settings,
             file_service=self._file_service,
+            start_gate=self._start_gate,
         )
