@@ -672,8 +672,14 @@ class HlsChannelWorker(BaseChannelWorker):
 
     def _should_probe_hls_segment(self, latest_segment_number: int) -> bool:
         hls = self.channel.hls
-        if hls is None or hls.probe_mode == "off":
+        if hls is None:
             return False
+        if hls.probe_mode == "off":
+            if self.channel.transcoding.audio != "transcode":
+                return False
+            if self._last_checked_segment_number is None:
+                return True
+            return latest_segment_number - self._last_checked_segment_number >= hls.probe_interval_segments
         if hls.probe_mode == "every_segment":
             return latest_segment_number != self._last_checked_segment_number
         if self._last_checked_segment_number is None:
