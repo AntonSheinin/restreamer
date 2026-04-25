@@ -4,7 +4,7 @@ input_video_stream_index = 1
 output_format = "hls"
 
 [channels.kan11.transcoding]
-video = "transcode"
+video = "copy"
 audio = "transcode"
 video_bitrate = "2800k"
 video_fps = 25
@@ -26,6 +26,7 @@ output_format = "hls"
 [channels.kan_edu.transcoding]
 video = "copy"
 audio = "transcode"
+video_fps = 25
 
 [channels.kan_edu.hls]
 segment_time = 4
