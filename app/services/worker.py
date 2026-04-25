@@ -322,6 +322,17 @@ class BaseChannelWorker(ABC):
             input_args.extend(["-live_start_index", str(self.channel.input_live_start_index)])
 
         tshttp = self._active_tshttp_settings()
+        if self.channel.output_format == "hls":
+            input_args.extend(
+                [
+                    "-fflags",
+                    "+genpts+discardcorrupt",
+                    "-analyzeduration",
+                    "5000000",
+                    "-probesize",
+                    "5000000",
+                ]
+            )
         if tshttp is not None and tshttp.input_fflags:
             input_args.extend(["-fflags", tshttp.input_fflags])
 
