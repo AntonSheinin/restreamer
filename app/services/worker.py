@@ -413,7 +413,8 @@ class BaseChannelWorker(ABC):
             if self.channel.transcoding.video_fps is not None:
                 fps = self.channel.transcoding.video_fps
                 hls = self.channel.hls
-                gop = fps * (hls.segment_time if hls is not None else 4)
+                segment_time = hls.segment_time if hls is not None else 4
+                gop = fps * segment_time
                 args.extend(
                     [
                         "-r",
@@ -424,6 +425,8 @@ class BaseChannelWorker(ABC):
                         str(gop),
                         "-sc_threshold",
                         "0",
+                        "-force_key_frames",
+                        f"expr:gte(t,n_forced*{segment_time})",
                     ]
                 )
             if self._settings.ffmpeg_threads:
@@ -517,10 +520,18 @@ class HlsChannelWorker(BaseChannelWorker):
         if hls is None:
             raise ValueError(f"channel '{self.channel.name}' missing hls settings")
 
+        hls_flags = [
+            "delete_segments",
+            "omit_endlist",
+            "temp_file",
+        ]
+        if self.channel.transcoding.video == "transcode":
+            hls_flags.append("independent_segments")
+
         return [
             *self._common_ffmpeg_args(),
             "-mpegts_flags",
-            "resend_headers",
+            "resend_headers+pat_pmt_at_frames",
             "-f",
             "hls",
             "-hls_time",
@@ -530,7 +541,7 @@ class HlsChannelWorker(BaseChannelWorker):
             "-hls_delete_threshold",
             str(hls.delete_threshold),
             "-hls_flags",
-            "delete_segments+omit_endlist+temp_file",
+            "+".join(hls_flags),
             "-hls_segment_filename",
             self._file_service.segment_path_pattern(self.channel.name),
             str(self._file_service.playlist_path(self.channel.name)),
