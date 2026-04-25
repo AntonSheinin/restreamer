@@ -3,11 +3,8 @@ source_url = "https://n-121-6.il.cdn-redge.media/livedash/oil/kancdn-live/live/k
 output_format = "hls"
 
 [channels.kan11.transcoding]
-video = "transcode"
-audio = "transcode"
-video_width = 1280
-video_height = 720
-video_bitrate = "2800k"
+video = "copy"
+audio = "copy"
 
 [channels.kan11.hls]
 segment_time = 4
